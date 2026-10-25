@@ -80,7 +80,14 @@ set(llvm_deps "")
 set_property(TARGET lldb-mi PROPERTY CXX_STANDARD 17)
 
 if (USE_LLDB_FRAMEWORK)
-  find_library(lib_lldb NAMES LLDB PATHS ${LLVM_BINARY_DIR}/Library/Frameworks)
+  set(LLDB_FRAMEWORK_PATH "" CACHE PATH
+      "Directory containing the LLDB.framework to link")
+  if (LLDB_FRAMEWORK_PATH)
+    find_library(lib_lldb NAMES LLDB PATHS ${LLDB_FRAMEWORK_PATH}
+                 NO_DEFAULT_PATH)
+  else()
+    find_library(lib_lldb NAMES LLDB PATHS ${LLVM_BINARY_DIR}/Library/Frameworks)
+  endif()
 else()
   find_library(lib_lldb NAMES lldb liblldb HINTS ${LLVM_LIBRARY_DIRS})
 endif()

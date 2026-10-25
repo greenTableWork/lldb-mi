@@ -9,8 +9,11 @@
 #pragma once
 
 // Third Party Headers:
+#include "lldb/API/SBFrame.h"
 #include "lldb/API/SBValue.h"
 #include <map>
+#include <set>
+#include <vector>
 
 // In-house headers:
 #include "MIUtilString.h"
@@ -66,7 +69,10 @@ public:
   static CMIUtilString GetValueStringFormatted(const lldb::SBValue &vrValue,
                                                const varFormat_e veVarFormat);
   static void VarObjAdd(const CMICmnLLDBDebugSessionInfoVarObj &vrVarObj);
-  static void VarObjDelete(const CMIUtilString &vrVarName);
+  static MIuint VarObjDelete(const CMIUtilString &vrVarName,
+                             bool vbChildrenOnly = false);
+  static std::vector<CMIUtilString>
+  VarObjGetChildren(const CMIUtilString &vrVarName);
   static bool VarObjGet(const CMIUtilString &vrVarName,
                         CMICmnLLDBDebugSessionInfoVarObj &vrwVarObj);
   static void VarObjUpdate(const CMICmnLLDBDebugSessionInfoVarObj &vrVarObj);
@@ -85,7 +91,7 @@ public:
   /* ctor */ CMICmnLLDBDebugSessionInfoVarObj(
       const CMIUtilString &vrStrNameReal, const CMIUtilString &vrStrName,
       const lldb::SBValue &vrValue, const CMIUtilString &vrStrVarObjParentName,
-      const valObjKind_ec eValObjKind);
+      const valObjKind_ec eValObjKind, MIuint vnChildIndex);
   /* ctor */ CMICmnLLDBDebugSessionInfoVarObj(
       const CMICmnLLDBDebugSessionInfoVarObj &vrOther);
   /* ctor */ CMICmnLLDBDebugSessionInfoVarObj(
@@ -105,6 +111,12 @@ public:
   bool SetVarFormat(const varFormat_e veVarFormat);
   const CMIUtilString &GetVarParentName() const;
   valObjKind_ec GetValObjKind() const;
+  MIuint GetChildIndex() const { return m_nChildIndex; }
+  // Refresh only this node's registered binding, without visiting siblings.
+  void RefreshValue();
+  bool GetInScope() const { return m_lastUpdate.inScope; }
+  const CMIUtilString &GetTypeName() const { return m_lastUpdate.type; }
+  bool CheckForChanges(bool &vrwbTypeChanged);
   void UpdateValue();
   bool ExchangeChanged(const bool bChanged);
 
@@ -117,8 +129,6 @@ public:
 private:
   typedef std::map<CMIUtilString, CMICmnLLDBDebugSessionInfoVarObj>
       MapKeyToVarObj_t;
-  typedef std::pair<CMIUtilString, CMICmnLLDBDebugSessionInfoVarObj>
-      MapPairKeyToVarObj_t;
 
   // Statics:
 private:
@@ -131,12 +141,19 @@ private:
 private:
   void CopyOther(const CMICmnLLDBDebugSessionInfoVarObj &vrOther);
   void MoveOther(CMICmnLLDBDebugSessionInfoVarObj &&vrwOther);
+  struct ValueState {
+    CMIUtilString value;
+    CMIUtilString type;
+    bool inScope = false;
+  };
+  ValueState ReadValueState();
 
   // Attributes:
 private:
   static const char *ms_aVarFormatStrings[];
   static const char *ms_aVarFormatChars[];
   static MapKeyToVarObj_t ms_mapVarIdToVarObj;
+  static std::map<CMIUtilString, std::set<CMIUtilString>> ms_mapChildren;
   static MIuint ms_nVarUniqueId;
   static varFormat_e ms_eDefaultFormat; // overrides "natural" format
   //
@@ -146,9 +163,12 @@ private:
   valObjKind_ec m_eValObjKind;
   CMIUtilString m_strName;
   lldb::SBValue m_SBValue;
+  lldb::SBFrame m_expressionFrame;
   CMIUtilString m_strNameReal;
   CMIUtilString m_strFormattedValue;
   CMIUtilString m_strVarObjParentName;
+  MIuint m_nChildIndex = UINT32_MAX;
+  ValueState m_lastUpdate;
   bool m_bChanged;
   // *** Update the copy move constructors and assignment operator ***
 };

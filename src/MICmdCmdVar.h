@@ -114,13 +114,10 @@ public:
 
   // Methods:
 private:
-  bool ExamineSBValueForChange(lldb::SBValue &vrwValue, bool &vrwbChanged);
-  bool
-  PrintValue(CMICmnLLDBDebugSessionInfo::VariableInfoFormat_e eVarInfoFormat,
-             lldb::SBValue &value, const CMIUtilString &valueName);
   void MIFormResponse(const CMIUtilString &vrStrVarName,
                       const char *const vpValue,
-                      const CMIUtilString &vrStrScope);
+                      const CMIUtilString &vrStrScope, const char *vpNewType,
+                      MIuint vnNewChildren);
 
   // Attribute:
 private:
@@ -157,6 +154,8 @@ public:
   // Attribute:
 private:
   const CMIUtilString m_constStrArgName;
+  const CMIUtilString m_constStrArgChildrenOnly;
+  MIuint m_nDeleted;
 };
 
 //++

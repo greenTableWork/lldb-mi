@@ -1178,8 +1178,11 @@ static bool FindLocalVariableAddress(lldb::SBTarget &rSbTarget,
                                      lldb::SBFrame &rSbFrame,
                                      const CMIUtilString &rExpression,
                                      lldb::addr_t &rAddress, size_t &rSize) {
-  auto sbVariableValue = rSbFrame.GetValueForVariablePath(
-      rExpression.c_str(), lldb::eNoDynamicValues);
+  // Keep this path on the common SBFrame API shared by the Command Line Tools
+  // and Xcode LLDB frameworks. Nested expressions fall through to the address
+  // expression evaluator below.
+  auto sbVariableValue =
+      rSbFrame.FindVariable(rExpression.c_str(), lldb::eNoDynamicValues);
   auto sbAddress = sbVariableValue.GetAddress();
 
   bool isValid = sbVariableValue && sbAddress;

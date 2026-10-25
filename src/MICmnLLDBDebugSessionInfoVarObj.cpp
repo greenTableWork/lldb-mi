@@ -10,6 +10,9 @@
 #include "MICmnLLDBDebugSessionInfoVarObj.h"
 #include "MICmnLLDBProxySBValue.h"
 #include "MICmnLLDBUtilSBValue.h"
+#include "lldb/API/SBError.h"
+#include "lldb/API/SBExpressionOptions.h"
+#include "lldb/API/SBFrame.h"
 
 // Instantiations:
 const char *CMICmnLLDBDebugSessionInfoVarObj::ms_aVarFormatStrings[] = {
@@ -23,6 +26,8 @@ const char *CMICmnLLDBDebugSessionInfoVarObj::ms_aVarFormatChars[] = {
     "<Invalid var format>", "t", "o", "d", "x", "N"};
 CMICmnLLDBDebugSessionInfoVarObj::MapKeyToVarObj_t
     CMICmnLLDBDebugSessionInfoVarObj::ms_mapVarIdToVarObj;
+std::map<CMIUtilString, std::set<CMIUtilString>>
+    CMICmnLLDBDebugSessionInfoVarObj::ms_mapChildren;
 MIuint CMICmnLLDBDebugSessionInfoVarObj::ms_nVarUniqueId = 0; // Index from 0
 CMICmnLLDBDebugSessionInfoVarObj::varFormat_e
     CMICmnLLDBDebugSessionInfoVarObj::ms_eDefaultFormat = eVarFormat_Natural;
@@ -57,6 +62,8 @@ CMICmnLLDBDebugSessionInfoVarObj::CMICmnLLDBDebugSessionInfoVarObj(
     : m_eVarFormat(eVarFormat_Natural), m_eVarType(eVarType_Internal),
       m_eValObjKind(eValObjKind), m_strName(vrStrName), m_SBValue(vrValue),
       m_strNameReal(vrStrNameReal), m_bChanged(false) {
+  m_expressionFrame = m_SBValue.GetFrame();
+  m_lastUpdate = ReadValueState();
   UpdateValue();
 }
 
@@ -76,11 +83,13 @@ CMICmnLLDBDebugSessionInfoVarObj::CMICmnLLDBDebugSessionInfoVarObj(
 CMICmnLLDBDebugSessionInfoVarObj::CMICmnLLDBDebugSessionInfoVarObj(
     const CMIUtilString &vrStrNameReal, const CMIUtilString &vrStrName,
     const lldb::SBValue &vrValue, const CMIUtilString &vrStrVarObjParentName,
-    const valObjKind_ec eValObjKind)
+    const valObjKind_ec eValObjKind, MIuint vnChildIndex)
     : m_eVarFormat(eVarFormat_Natural), m_eVarType(eVarType_Internal),
       m_eValObjKind(eValObjKind), m_strName(vrStrName), m_SBValue(vrValue),
       m_strNameReal(vrStrNameReal),
-      m_strVarObjParentName(vrStrVarObjParentName), m_bChanged(false) {
+      m_strVarObjParentName(vrStrVarObjParentName), m_nChildIndex(vnChildIndex),
+      m_bChanged(false) {
+  m_lastUpdate = ReadValueState();
   UpdateValue();
 }
 
@@ -156,9 +165,12 @@ void CMICmnLLDBDebugSessionInfoVarObj::CopyOther(
   m_eValObjKind = vrOther.m_eValObjKind;
   m_strName = vrOther.m_strName;
   m_SBValue = vrOther.m_SBValue;
+  m_expressionFrame = vrOther.m_expressionFrame;
   m_strNameReal = vrOther.m_strNameReal;
   m_strFormattedValue = vrOther.m_strFormattedValue;
   m_strVarObjParentName = vrOther.m_strVarObjParentName;
+  m_nChildIndex = vrOther.m_nChildIndex;
+  m_lastUpdate = vrOther.m_lastUpdate;
   m_bChanged = vrOther.m_bChanged;
 }
 
@@ -176,9 +188,12 @@ void CMICmnLLDBDebugSessionInfoVarObj::MoveOther(
   m_eValObjKind = vrwOther.m_eValObjKind;
   m_strName = std::move(vrwOther.m_strName);
   m_SBValue = std::move(vrwOther.m_SBValue);
+  m_expressionFrame = std::move(vrwOther.m_expressionFrame);
   m_strNameReal = std::move(vrwOther.m_strNameReal);
   m_strFormattedValue = std::move(vrwOther.m_strFormattedValue);
   m_strVarObjParentName = std::move(vrwOther.m_strVarObjParentName);
+  m_nChildIndex = vrwOther.m_nChildIndex;
+  m_lastUpdate = std::move(vrwOther.m_lastUpdate);
   m_bChanged = vrwOther.m_bChanged;
 
   vrwOther.m_eVarFormat = eVarFormat_Natural;
@@ -186,9 +201,12 @@ void CMICmnLLDBDebugSessionInfoVarObj::MoveOther(
   vrwOther.m_eValObjKind = valObjKind_ec::eValObjKind_Other;
   vrwOther.m_strName.clear();
   vrwOther.m_SBValue.Clear();
+  vrwOther.m_expressionFrame = lldb::SBFrame();
   vrwOther.m_strNameReal.clear();
   vrwOther.m_strFormattedValue.clear();
   vrwOther.m_strVarObjParentName.clear();
+  vrwOther.m_nChildIndex = UINT32_MAX;
+  vrwOther.m_lastUpdate = ValueState();
   vrwOther.m_bChanged = false;
 }
 
@@ -331,6 +349,7 @@ CMIUtilString CMICmnLLDBDebugSessionInfoVarObj::GetStringFormatted(
 //--
 void CMICmnLLDBDebugSessionInfoVarObj::VarObjClear() {
   ms_mapVarIdToVarObj.clear();
+  ms_mapChildren.clear();
 }
 
 //++
@@ -342,9 +361,22 @@ void CMICmnLLDBDebugSessionInfoVarObj::VarObjClear() {
 //--
 void CMICmnLLDBDebugSessionInfoVarObj::VarObjAdd(
     const CMICmnLLDBDebugSessionInfoVarObj &vrVarObj) {
-  VarObjDelete(vrVarObj.GetName());
-  MapPairKeyToVarObj_t pr(vrVarObj.GetName(), vrVarObj);
-  ms_mapVarIdToVarObj.insert(pr);
+  const auto &name = vrVarObj.GetName();
+  const auto &parent = vrVarObj.GetVarParentName();
+  const auto old = ms_mapVarIdToVarObj.find(name);
+  if (old != ms_mapVarIdToVarObj.end() &&
+      old->second.GetVarParentName() != parent) {
+    auto siblings = ms_mapChildren.find(old->second.GetVarParentName());
+    if (siblings != ms_mapChildren.end()) {
+      siblings->second.erase(name);
+      if (siblings->second.empty())
+        ms_mapChildren.erase(siblings);
+    }
+  }
+  // Replacing a value must not delete its registered descendants.
+  ms_mapVarIdToVarObj.insert_or_assign(name, vrVarObj);
+  if (!parent.empty())
+    ms_mapChildren[parent].insert(name);
 }
 
 //++
@@ -352,16 +384,46 @@ void CMICmnLLDBDebugSessionInfoVarObj::VarObjAdd(
 // specified name.
 // Type:    Static method.
 // Args:    vrVarName   - (R) The var value name.
-// Returns: None.
+// Returns: Number of registered objects removed.
 // Throws:  None.
 //--
-void CMICmnLLDBDebugSessionInfoVarObj::VarObjDelete(
-    const CMIUtilString &vrVarName) {
-  const MapKeyToVarObj_t::const_iterator it =
-      ms_mapVarIdToVarObj.find(vrVarName);
-  if (it != ms_mapVarIdToVarObj.end()) {
-    ms_mapVarIdToVarObj.erase(it);
+MIuint
+CMICmnLLDBDebugSessionInfoVarObj::VarObjDelete(const CMIUtilString &vrVarName,
+                                               bool vbChildrenOnly) {
+  std::vector<CMIUtilString> pending =
+      vbChildrenOnly ? VarObjGetChildren(vrVarName)
+                     : std::vector<CMIUtilString>{vrVarName};
+  MIuint deleted = 0;
+  while (!pending.empty()) {
+    const CMIUtilString name = std::move(pending.back());
+    pending.pop_back();
+    const auto children = ms_mapChildren.find(name);
+    if (children != ms_mapChildren.end()) {
+      pending.insert(pending.end(), children->second.begin(),
+                     children->second.end());
+      ms_mapChildren.erase(children);
+    }
+    const auto node = ms_mapVarIdToVarObj.find(name);
+    if (node == ms_mapVarIdToVarObj.end())
+      continue;
+    const auto siblings = ms_mapChildren.find(node->second.GetVarParentName());
+    if (siblings != ms_mapChildren.end()) {
+      siblings->second.erase(name);
+      if (siblings->second.empty())
+        ms_mapChildren.erase(siblings);
+    }
+    ms_mapVarIdToVarObj.erase(node);
+    ++deleted;
   }
+  return deleted;
+}
+
+std::vector<CMIUtilString> CMICmnLLDBDebugSessionInfoVarObj::VarObjGetChildren(
+    const CMIUtilString &vrVarName) {
+  const auto children = ms_mapChildren.find(vrVarName);
+  if (children == ms_mapChildren.end())
+    return {};
+  return {children->second.begin(), children->second.end()};
 }
 
 //++
@@ -535,11 +597,64 @@ void CMICmnLLDBDebugSessionInfoVarObj::UpdateValue() {
   m_strFormattedValue = GetValueStringFormatted(m_SBValue, m_eVarFormat);
 
   MIuint64 nValue = 0;
-  if (CMICmnLLDBProxySBValue::GetValueAsUnsigned(m_SBValue, nValue) ==
-      MIstatus::failure)
-    m_eVarType = eVarType_Composite;
+  m_eVarType = CMICmnLLDBProxySBValue::GetValueAsUnsigned(m_SBValue, nValue)
+                   ? eVarType_Internal
+                   : eVarType_Composite;
 
   CMICmnLLDBDebugSessionInfoVarObj::VarObjUpdate(*this);
+}
+
+void CMICmnLLDBDebugSessionInfoVarObj::RefreshValue() {
+  if (!m_strVarObjParentName.empty()) {
+    CMICmnLLDBDebugSessionInfoVarObj parent;
+    lldb::SBValue value;
+    if (VarObjGet(m_strVarObjParentName, parent) &&
+        parent.GetValue().IsInScope() &&
+        parent.GetValue().GetNumChildren(m_nChildIndex + 1) > m_nChildIndex) {
+      value = parent.GetValue().GetChildAtIndex(m_nChildIndex);
+      // An index can acquire a different member when a dynamic type changes.
+      if (CMICmnLLDBUtilSBValue(value).GetName() != m_strNameReal)
+        value.Clear();
+    }
+    m_SBValue = std::move(value);
+  } else if (m_eValObjKind == valObjKind_ec::eValObjKind_ConstResult) {
+    // Child expressions are parent-relative names, not standalone expressions.
+    lldb::SBExpressionOptions options;
+    options.SetSuppressPersistentResult(true);
+    m_SBValue =
+        m_expressionFrame.EvaluateExpression(m_strNameReal.c_str(), options);
+  }
+  VarObjUpdate(*this);
+}
+
+CMICmnLLDBDebugSessionInfoVarObj::ValueState
+CMICmnLLDBDebugSessionInfoVarObj::ReadValueState() {
+  ValueState state;
+  // Update only this SBValue. LLDB's change flag describes an execution stop,
+  // whereas MI needs changes since the previous -var-update. Keep our own
+  // snapshot so evaluating a value cannot consume a notification and polling
+  // twice at the same stop cannot repeat it.
+  m_SBValue.GetValueDidChange();
+  state.inScope = m_SBValue.IsValid() && m_SBValue.IsInScope() &&
+                  m_SBValue.GetError().Success();
+  if (state.inScope) {
+    state.value = GetValueStringFormatted(m_SBValue, eVarFormat_Natural);
+    state.type = CMICmnLLDBUtilSBValue(m_SBValue).GetTypeNameDisplay();
+  } else {
+    state.type = m_lastUpdate.type;
+  }
+  return state;
+}
+
+bool CMICmnLLDBDebugSessionInfoVarObj::CheckForChanges(bool &vrwbTypeChanged) {
+  const auto state = ReadValueState();
+  vrwbTypeChanged = state.inScope && state.type != m_lastUpdate.type;
+  const bool changed = ExchangeChanged(false) ||
+                       state.inScope != m_lastUpdate.inScope ||
+                       state.value != m_lastUpdate.value || vrwbTypeChanged;
+  m_lastUpdate = state;
+  UpdateValue();
+  return changed;
 }
 
 //++
